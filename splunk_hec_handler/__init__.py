@@ -156,7 +156,7 @@ class SplunkHecHandler(logging.Handler):
             logging.debug(f"Unable to serialize message ({record.msg}) to Splunk log format: {str(e)}")
             body.update({'message': str(record.msg)})
 
-        event = dict({'host': self.hostname, 'event': body})
+        event = dict({'host': self.hostname, 'event': body, 'fields': {}})
 
         # Splunk 7.x does not like empty fields
         if self.source is not None:
@@ -188,13 +188,10 @@ class SplunkHecHandler(logging.Handler):
                         event[k] = v
                     else:
                         try:
-                            if type(v) in [str, list]:
-                                event.setdefault('fields', {})[k] = v
-                            else:
-                                # Splunk fails to index event if fields contains values of type other than str or list
-                                # i.e HTTP Status: 400, Reason: Bad Request,
-                                # Content: {"text":" Error in handling indexed fields", "code":15}
-                                event.setdefault('fields', {})[k] = str(v)
+                            event['fields'][k] = v if type(v) in [str, list] else str(v)
+                            # Splunk fails to index event if fields contains values of type other than str or list
+                            # i.e HTTP Status: 400, Reason: Bad Request,
+                            # Content: {"text":" Error in handling indexed fields", "code":15}
                         except Exception:
                             pass
             except Exception as e:
