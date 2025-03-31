@@ -89,7 +89,7 @@ class SplunkHecHandler(logging.Handler):
 
         # Handle ssl_verify parameter
         value = ssl_verify.lower() if isinstance(ssl_verify, str) else ssl_verify
-        self.ssl_verify = not (value in ["0", 0, "false", "False", False])
+        self.ssl_verify = not (value in ["0", 0, "false", False])
         self.source = source
         self.index = index
         self.sourcetype = sourcetype
