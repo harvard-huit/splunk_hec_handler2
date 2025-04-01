@@ -3,6 +3,7 @@ import logging
 import requests
 import ast
 import socket
+from typing import Dict, Any, Optional, Union
 
 
 class SplunkHecHandler(logging.Handler):
@@ -56,60 +57,65 @@ class SplunkHecHandler(logging.Handler):
     URL_PATTERN = "{0}://{1}:{2}/services/collector/{3}"
     TIMEOUT = 30
 
-    def __init__(self, host, token, **kwargs):
+    def __init__(self, host: str, token: str, port: int = 8080, proto: str = 'https',
+                 ssl_verify: Union[bool, str] = True, source: Optional[str] = None, index: Optional[str] = None,
+                 sourcetype: Optional[str] = None, hostname: Optional[str] = None, endpoint: str = 'event',
+                 empty_body: bool = False, test_connection: bool = True, app_data: Dict[str, Any] = None,
+                 timeout: int = None, **kwargs):
         """
         Creates a python logging handler, capable of sending logs to Splunk server.
 
         :param host: Splunk server hostname or IP.
-        :type host: ``str``
         :param token: Splunk HEC Token (see http://docs.splunk.com/Documentation/Splunk/latest/Data/UsetheHTTPEventCollector#About_Event_Collector_tokens)
-        :type token: ``str``
-
-        :kwargs Keyword Arguments :
-            * *port* (``int``) -- 0-65535 port number of Splunk HEC listener
-            * *proto* (``str``) -- [http | https]
-            * *ssl_verify* (``bool|str```) -- [True|False|<Path to cert>].  True by default.
-                see https://2.python-requests.org/en/master/user/advanced/#ssl-cert-verification
-            * *source* (``str``) -- Override source value specified in Splunk HEC configuration.  None by default.
-            * *sourcetype* (``str``) -- Override sourcetype value specified in Splunk HEC configuration.  None by default.
-            * *hostname* (``str``) -- Specify custom host value.  Defaults to hostname returned by socket.gethostname()
-            * *endpoint* (``str``) -- [raw|event].  Use 'raw' if field extractions should be skipped.
-                see http://docs.splunk.com/Documentation/Splunk/latest/RESTREF/RESTinput#services.2Fcollector.2Fraw
-            * *empty_body* (``bool``) -- [True|False] Initialize with an empty body. Eliminate *log_level* in log body.  *Default is False.*
+        :param port: Port number of Splunk HEC listener. Default is 8080.
+        :param proto: Protocol to use [http | https]. Default is 'https'.
+        :param ssl_verify: SSL verification [True|False|<Path to cert>]. Default is True.
+        :param source: Override source value specified in Splunk HEC configuration. Default is None.
+        :param index: Override index value specified in Splunk HEC configuration. Default is None.
+        :param sourcetype: Override sourcetype value specified in Splunk HEC configuration. Default is None.
+        :param hostname: Specify custom host value. Defaults to socket.gethostname().
+        :param endpoint: HEC endpoint type [raw|event]. Default is 'event'.
+        :param empty_body: Initialize with an empty body. Default is False.
+        :param test_connection: Test connection during initialization. Default is True.
+        :param app_data: Application-specific data to include in every log event. Default is {}.
+        :param timeout: Connection timeout in seconds. Default is 30.
+        :param kwargs: Additional keyword arguments.
         """
+        logging.Handler.__init__(self)
         self.host = host
         self.token = token
-        if kwargs is not None:
-            self.port = int(kwargs.get('port', 8080))
-            self.proto = kwargs.get('proto', 'https')
-            self.ssl_verify = False if (kwargs.get('ssl_verify') in ["0", 0, "false", "False", False]) \
-                else kwargs.get('ssl_verify') or True
-            self.source = kwargs.get('source')
-            self.index = kwargs.get('index')
-            self.sourcetype = kwargs.get('sourcetype')
-            self.hostname = kwargs.get('hostname', socket.gethostname())
-            self.endpoint = kwargs.get('endpoint', 'event')
-            self.empty_body = kwargs.get('empty_body', False)
+        self.port = int(port)
+        self.proto = proto
 
-        try:
-            # Testing connectivity
-            s = socket.socket()
-            s.settimeout(kwargs.get('timeout', self.TIMEOUT))
-            s.connect((self.host, self.port))
+        # Handle ssl_verify parameter
+        value = ssl_verify.lower() if isinstance(ssl_verify, str) else ssl_verify
+        self.ssl_verify = not (value in ["0", 0, "false", False])
+        self.source = source
+        self.index = index
+        self.sourcetype = sourcetype
+        self.hostname = hostname if hostname is not None else socket.gethostname()
+        self.endpoint = endpoint
+        self.empty_body = empty_body
+        self.test_connection = test_connection
+        self.app_data = app_data if app_data is not None else {}
+        self.timeout = timeout if timeout is not None else self.TIMEOUT
 
-            # Socket accessible.  Establish requests session
-            self.r = requests.session()
-            self.r.max_redirects = 1
-            self.r.verify = self.ssl_verify
-            self.r.headers['Authorization'] = "Splunk {}".format(self.token)
-            logging.Handler.__init__(self)
-        except Exception as err:
-            logging.debug("Failed to connect to remote Splunk server (%s:%s). Exception: %s"
-                          % (self.host, self.port, err))
-            raise err
-        else:
-            self.url = self.URL_PATTERN.format(self.proto, self.host, self.port, self.endpoint)
-            s.close()
+        # Establish requests session
+        self.r = requests.session()
+        self.r.max_redirects = 1
+        self.r.verify = self.ssl_verify
+        self.r.headers['Authorization'] = f"Splunk {self.token}"
+        self.url = self.URL_PATTERN.format(self.proto, self.host, self.port, self.endpoint)
+
+        # Test connection if enabled
+        if self.test_connection:
+            try:
+                with socket.socket() as s:
+                    s.settimeout(self.timeout)
+                    s.connect((self.host, self.port))
+            except Exception as err:
+                logging.debug(f"Failed to connect to remote Splunk server ({self.host}:{self.port}). Exception: {err}")
+                raise err
 
     def emit(self, record):
         """
@@ -123,16 +129,32 @@ class SplunkHecHandler(logging.Handler):
         else:
             body = {'log_level': record.levelname}
 
+            # Include application-specific data
+            if self.app_data:
+                body.update(self.app_data)
+
+            # Add useful record attributes by default
+            for field in ('logger', 'lineno', 'funcName', 'module', 'process'):
+                value = getattr(record, field, None)
+                if value is not None:
+                    body[field] = value
+
         try:
-            if record.msg.__class__ == dict:
-                # If record.msg is dict, leverage it as is
+            if isinstance(record.msg, dict):
                 body.update(record.msg)
             else:
-                # Check to see if msg can be converted to a python object
-                body.update({'message': ast.literal_eval(str(record.msg))})
-        except Exception as err:
-            logging.debug("Log record emit exception raised. Exception: %s " % err)
-            body.update({'message': record.msg})
+                try:
+                    # Try to convert string representation to object
+                    parsed_msg = ast.literal_eval(str(record.msg))
+                    if isinstance(parsed_msg, dict):
+                        body.update(parsed_msg)
+                    else:
+                        body.update({'message': record.msg})
+                except (ValueError, SyntaxError):
+                    body.update({'message': record.msg})
+        except Exception as e:
+            logging.debug(f"Unable to serialize message ({record.msg}) to Splunk log format: {str(e)}")
+            body.update({'message': str(record.msg)})
 
         event = dict({'host': self.hostname, 'event': body, 'fields': {}})
 
@@ -166,17 +188,14 @@ class SplunkHecHandler(logging.Handler):
                         event[k] = v
                     else:
                         try:
-                            if type(v) in [str, list]:
-                                event['fields'][k] = v
-                            else:
-                                # Splunk fails to index event if fields contains values of type other than str or list
-                                # i.e HTTP Status: 400, Reason: Bad Request,
-                                # Content: {"text":" Error in handling indexed fields", "code":15}
-                                event['fields'][k] = str(v)
+                            event['fields'][k] = v if type(v) in [str, list] else str(v)
+                            # Splunk fails to index event if fields contains values of type other than str or list
+                            # i.e HTTP Status: 400, Reason: Bad Request,
+                            # Content: {"text":" Error in handling indexed fields", "code":15}
                         except Exception:
                             pass
-            except Exception:
-                pass
+            except Exception as e:
+                logging.debug(f"Error processing fields: {str(e)}")
             else:
                 body.pop('fields')
 
@@ -186,17 +205,26 @@ class SplunkHecHandler(logging.Handler):
             # 'default' - If specified, default should be a function that gets called for objects that can’t otherwise
             # be serialized. It should return a JSON encode-able version of the object or raise a TypeError.
             data = json.dumps(event, sort_keys=True, skipkeys=True, default=self.serializer)
-        except TypeError:
-            raise
+        except Exception as e:
+            logging.debug(f"Unable to serialize event data to Splunk log format: {str(e)}")
+            # Fallback to simplified event
+            try:
+                simplified_event = {
+                    'host': self.hostname,
+                    'event': {'log_level': record.levelname, 'message': str(record.msg)},
+                    'time': record.created
+                }
+                data = json.dumps(simplified_event)
+            except Exception:
+                # If all serialization fails, we can't send the log
+                return
 
         try:
-            req = self.r.post(self.url, data=data, timeout=self.TIMEOUT, headers={'Connection': 'close'})
-
+            req = self.r.post(self.url, data=data, timeout=self.timeout)
             req.raise_for_status()
         except requests.exceptions.HTTPError as err:
-            logging.debug("Failed to emit record to Splunk server (%s:%s).  Exception raised: %s"
-                          % (self.host, self.port, err))
-            raise err
+            logging.debug(f"Failed to emit record to Splunk server ({self.host}:{self.port}).  Exception raised: {err}")
+            raise
 
     @staticmethod
     def serializer(obj):
@@ -207,3 +235,11 @@ class SplunkHecHandler(logging.Handler):
                 return str(obj)
             except Exception:
                 raise
+
+    def close(self):
+        try:
+            self.r.close()
+        except Exception:
+            pass
+        finally:
+            super().close()
